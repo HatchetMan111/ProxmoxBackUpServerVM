@@ -34,6 +34,20 @@ Danach ist PBS unter `https://<vm-ip>:8007` erreichbar. Tipp: Wer die IP schon v
 festlegen will, gibt sie dem Script mit (`--ip-cidr ... --gateway ...`), dann steht sie
 in der Abschluss-Anleitung.
 
+### Danach: Post-Install-Script IN der PBS-VM ausfuehren
+
+Nach der Installation **in der PBS-VM selbst** (Konsole/SSH als root, *nicht* auf dem
+PVE-Host) das Community Post-Install-Script laufen lassen:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/tools/pve/post-pbs-install.sh)"
+```
+
+Was es macht (interaktiv, am besten alles mit `yes` bestaetigen): Enterprise-Repo
+deaktivieren, PBS-Quellen korrigieren, No-Subscription-Repo aktivieren (optional Test-Repo),
+Subscription-Nag deaktivieren, System updaten und Reboot anbieten. Unterstuetzt PBS 3.x
+(bookworm) und PBS 4.x (trixie). Danach rebooten und den Datastore anlegen.
+
 ## Beispiele
 
 ```bash
