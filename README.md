@@ -9,6 +9,31 @@ Das Script laeuft **auf dem PVE-Host als root**, erkennt VMID, Storage und Bridg
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/ProxmoxBackUpServerVM/main/pbs-vm-install.sh)"
 ```
 
+### Danach: VM haendisch starten + Installer durchklicken
+
+Der Einzeiler erstellt nur die VM fertig (Disks, Netz, ISO eingelegt) — **installiert wird haendisch**
+im normalen visuellen PBS-Installer:
+
+```bash
+qm start <VMID>   # VMID steht in der Script-Ausgabe, z.B. qm start 104
+```
+
+Dann in der Proxmox-GUI auf die VM → **Konsole** und den Installer wie gewohnt durchgehen
+(Sprache, Zeitzone, Root-Passwort, Zielplatte = OS-Disk, Netzwerk).
+Zum Netzwerk: DHCP laeuft automatisch — falls dein Netz **kein DHCP** hat, im Installer
+stattdessen statisch eintragen (z.B. `192.168.178.50/24`, Gateway `192.168.178.1`,
+DNS `192.168.178.1`).
+
+Nach erfolgreicher Installation Boot auf die Platte stellen und ISO auswerfen:
+
+```bash
+qm set <VMID> --boot 'order=scsi0' && qm set <VMID> --delete ide2 && qm start <VMID>
+```
+
+Danach ist PBS unter `https://<vm-ip>:8007` erreichbar. Tipp: Wer die IP schon vorher
+festlegen will, gibt sie dem Script mit (`--ip-cidr ... --gateway ...`), dann steht sie
+in der Abschluss-Anleitung.
+
 ## Beispiele
 
 ```bash
