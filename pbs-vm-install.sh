@@ -67,9 +67,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Groessen normalisieren (erlaube "32" oder "32G")
-norm_g() { local v="$1"; if [[ "$v" =~ ^[0-9]+$ ]]; then echo "${v}G"; else echo "$v"; fi; }
-OS_DISK_SIZE="$(norm_g "$OS_DISK_SIZE")"
+# Groessen normalisieren: qm will fuer LVM-Thin eine reine Zahl in GB ("32", nicht "32G").
+# Hinweis: kein `local` in Funktionen, die in $(...) laufen (Bash-Bug "pop_var_context"
+# bei `bash -c "$(curl ...)"`). Daher hier bewusst globale Hilfsvariablen.
+norm_num() { echo "$1" | sed -E 's/^([0-9]+)[Gg]?$/\1/'; }
+OS_DISK_SIZE="$(norm_num "$OS_DISK_SIZE")"
+case "$OS_DISK_SIZE" in ''|*[!0-9]*) die "Ungueltige OS-Disk-Groesse: $OS_DISK_SIZE (Zahl in GB erwartet)."; esac
+DATA_DISK_SIZE="$(norm_num "$DATA_DISK_SIZE")"
+case "$DATA_DISK_SIZE" in ''|*[!0-9]*) die "Ungueltige Data-Disk-Groesse: $DATA_DISK_SIZE (Zahl in GB erwartet)."; esac
 
 [ "$(id -u)" -eq 0 ] || die "Bitte als root auf dem PVE-Host ausfuehren."
 command -v qm >/dev/null || die "qm nicht gefunden - laeuft das wirklich auf einem Proxmox VE Host?"
@@ -94,8 +99,8 @@ fi
 
 # Storage mit Content-Filter + meistem Platz
 pick_storage() {
-  local content="$1"
-  pvesm status --content "$content" 2>/dev/null \
+  __pick_content="$1"
+  pvesm status --content "$__pick_content" 2>/dev/null \
     | awk 'NR>1 && $2!="0" {print $1, $6}' | sort -k2 -n | tail -n1 | awk '{print $1}'
 }
 if [ "$IMG_STORAGE" = "auto" ]; then
@@ -117,11 +122,10 @@ fi
 mkdir -p "$ISO_DIR"
 
 latest_iso_url() {
-  local page iso
-  page="$(curl -fsSL https://enterprise.proxmox.com/iso/ 2>/dev/null || true)"
-  iso="$(echo "$page" | grep -oE 'proxmox-backup-server_[0-9]+\.[0-9-]+1\.iso' | sort -V | tail -n1)"
-  [ -n "${iso:-}" ] || return 1
-  echo "https://enterprise.proxmox.com/iso/$iso"
+  __iso_page="$(curl -fsSL https://enterprise.proxmox.com/iso/ 2>/dev/null || true)"
+  __iso_name="$(printf '%s' "$__iso_page" | grep -oE 'proxmox-backup-server_[0-9]+\.[0-9-]+1\.iso' | sort -V | tail -n1)"
+  [ -n "${__iso_name:-}" ] || return 1
+  echo "https://enterprise.proxmox.com/iso/$__iso_name"
 }
 
 ISO_FILE=""
@@ -151,9 +155,8 @@ ISO_VOL="$ISO_STORAGE:iso/$(basename "$ISO_FILE")"
 log "Erstelle VM $VMID ($VM_NAME): $CORES Cores, ${MEMORY}MB RAM, OS $OS_DISK_SIZE auf $IMG_STORAGE"
 run "qm create $VMID --name $VM_NAME --cores $CORES --memory $MEMORY --cpu $CPU_TYPE --machine q35 --bios ovmf --ostype l26 --scsihw virtio-scsi-pci --net0 virtio,bridge=$BRIDGE --efidisk0 $IMG_STORAGE:1,efitype=4m,pre-enrolled-keys=1"
 run "qm set $VMID --scsi0 $IMG_STORAGE:$OS_DISK_SIZE,iothread=1,discard=on,ssd=1"
-if [ "$DATA_DISK_SIZE" != "0" ] && [ "$DATA_DISK_SIZE" != "0G" ]; then
-  DATA_DISK_SIZE="$(norm_g "$DATA_DISK_SIZE")"
-  log "Extra Datastore-Disk: $DATA_DISK_SIZE"
+if [ "$DATA_DISK_SIZE" != "0" ]; then
+  log "Extra Datastore-Disk: ${DATA_DISK_SIZE}G"
   run "qm set $VMID --scsi1 $IMG_STORAGE:$DATA_DISK_SIZE,iothread=1,discard=on,ssd=1"
 fi
 run "qm set $VMID --ide2 $ISO_VOL,media=cdrom --boot order=scsi0\\;ide2 --serial0 socket --vga serial0"
