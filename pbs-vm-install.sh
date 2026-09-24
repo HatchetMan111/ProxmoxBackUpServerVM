@@ -19,6 +19,9 @@ ISO_URL="${ISO_URL:-auto}"
 MODE="manual"
 DRY_RUN=0
 CPU_TYPE="${CPU_TYPE:-host}"
+IP_CIDR="${IP_CIDR:-}"      # z.B. 192.168.178.50/24 (leer = DHCP)
+GATEWAY="${GATEWAY:-}"      # z.B. 192.168.178.1
+DNS="${DNS:-}"              # leer = GATEWAY (Fritz!Box & Co. loesen selbst auf)
 
 log() { echo "[pbs-vm] $*"; }
 die() { echo "[pbs-vm][ERROR] $*" >&2; exit 1; }
@@ -33,13 +36,16 @@ Optionen:
   --name NAME          VM-Name (default: pbs)
   --cores N            CPU-Kerne (default: 2)
   --memory MB          RAM in MB (default: 4096)
-  --os-disk SIZE       OS-Disk, z.B. 32G (default: 32)
-  --data-disk SIZE     extra Datastore-Disk in G, 0 = keine (default: 0)
+  --os-disk GB         OS-Disk in GB als reine Zahl (default: 32, LVM braucht Zahlenformat)
+  --data-disk GB       extra Datastore-Disk in GB, 0 = keine (default: 0)
   --bridge BR          z.B. vmbr0 (default: auto)
   --storage ST         Storage fuer VM-Disks (default: auto)
   --iso-storage ST     Storage fuer ISO (default: auto)
   --iso-url URL        PBS-ISO URL (default: auto = neueste von enterprise.proxmox.com)
-  --unattended         vollautomatische ISO-Installation per answer.toml (PBS >= 3.1)
+  --ip-cidr CIDR       statische IP, z.B. 192.168.178.50/24 (default: leer = DHCP)
+  --gateway IP         Gateway, z.B. 192.168.178.1 (Pflicht bei --ip-cidr)
+  --dns IP             DNS-Server (default: Gateway)
+  --unattended         vollautomatische Installation (braucht prepare-iso Tool, PBS >= 3.2)
   --manual             nur VM erstellen + ISO einlegen, Installer manuell klicken (default)
   --dry-run            nur zeigen, nichts erstellen
   -h, --help           Hilfe
@@ -59,6 +65,9 @@ while [ $# -gt 0 ]; do
     --storage) IMG_STORAGE="$2"; shift 2;;
     --iso-storage) ISO_STORAGE="$2"; shift 2;;
     --iso-url) ISO_URL="$2"; shift 2;;
+    --ip-cidr) IP_CIDR="$2"; shift 2;;
+    --gateway) GATEWAY="$2"; shift 2;;
+    --dns) DNS="$2"; shift 2;;
     --unattended) MODE="unattended"; shift;;
     --manual) MODE="manual"; shift;;
     --dry-run) DRY_RUN=1; shift;;
@@ -75,6 +84,14 @@ OS_DISK_SIZE="$(norm_num "$OS_DISK_SIZE")"
 case "$OS_DISK_SIZE" in ''|*[!0-9]*) die "Ungueltige OS-Disk-Groesse: $OS_DISK_SIZE (Zahl in GB erwartet)."; esac
 DATA_DISK_SIZE="$(norm_num "$DATA_DISK_SIZE")"
 case "$DATA_DISK_SIZE" in ''|*[!0-9]*) die "Ungueltige Data-Disk-Groesse: $DATA_DISK_SIZE (Zahl in GB erwartet)."; esac
+
+# Statische IP validieren (leer = DHCP)
+if [ -n "${IP_CIDR:-}" ]; then
+  [[ "$IP_CIDR" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]{1,2}$ ]] || die "Ungueltiges --ip-cidr: $IP_CIDR (Format 192.168.178.50/24 erwartet)."
+  [ -n "${GATEWAY:-}" ] || die "--gateway fehlt (Pflicht bei --ip-cidr)."
+  [ -n "${DNS:-}" ] || DNS="$GATEWAY"
+  log "Statische IP: $IP_CIDR via $GATEWAY (DNS $DNS)"
+fi
 
 [ "$(id -u)" -eq 0 ] || die "Bitte als root auf dem PVE-Host ausfuehren."
 command -v qm >/dev/null || die "qm nicht gefunden - laeuft das wirklich auf einem Proxmox VE Host?"
@@ -152,22 +169,41 @@ if [ -z "${ISO_FILE:-}" ]; then
 fi
 ISO_VOL="$ISO_STORAGE:iso/$(basename "$ISO_FILE")"
 
-log "Erstelle VM $VMID ($VM_NAME): $CORES Cores, ${MEMORY}MB RAM, OS $OS_DISK_SIZE auf $IMG_STORAGE"
+log "Erstelle VM $VMID ($VM_NAME): $CORES Cores, ${MEMORY}MB RAM, OS ${OS_DISK_SIZE}GB auf $IMG_STORAGE"
 run "qm create $VMID --name $VM_NAME --cores $CORES --memory $MEMORY --cpu $CPU_TYPE --machine q35 --bios ovmf --ostype l26 --scsihw virtio-scsi-pci --net0 virtio,bridge=$BRIDGE --efidisk0 $IMG_STORAGE:1,efitype=4m,pre-enrolled-keys=1"
 run "qm set $VMID --scsi0 $IMG_STORAGE:$OS_DISK_SIZE,iothread=1,discard=on,ssd=1"
 if [ "$DATA_DISK_SIZE" != "0" ]; then
-  log "Extra Datastore-Disk: ${DATA_DISK_SIZE}G"
+  log "Extra Datastore-Disk: ${DATA_DISK_SIZE}GB"
   run "qm set $VMID --scsi1 $IMG_STORAGE:$DATA_DISK_SIZE,iothread=1,discard=on,ssd=1"
 fi
-run "qm set $VMID --ide2 $ISO_VOL,media=cdrom --boot order=scsi0\\;ide2 --serial0 socket --vga serial0"
 
-ANSWER_ISO=""
+if [ "$MODE" = "manual" ]; then
+  # Standard-VGA: Installer-TUI ist in der noVNC-Konsole normal bedienbar
+  run "qm set $VMID --vga std"
+  INSTALL_ISO_VOL="$ISO_VOL"
+else
+  run "qm set $VMID --serial0 socket --vga serial0"
+  INSTALL_ISO_VOL=""  # wird im Unattended-Block auf das prepare-iso Image gesetzt
+fi
+
 if [ "$MODE" = "unattended" ]; then
-  log "Unattended-Modus: erzeuge answer.toml"
-  command -v genisoimage >/dev/null || command -v xorriso >/dev/null || log "WARN: weder genisoimage noch xorriso gefunden - Answer-ISO wird evtl. nicht gebaut."
+  log "Unattended-Modus: offizieller Weg via proxmox-auto-install-assistant (prepare-iso)"
+  if ! command -v proxmox-auto-install-assistant >/dev/null || ! command -v xorriso >/dev/null; then
+    log "Installiere proxmox-auto-install-assistant + xorriso ..."
+    if [ "$DRY_RUN" -eq 1 ]; then echo "+ apt-get update && apt-get install -y proxmox-auto-install-assistant xorriso";
+    else apt-get update && apt-get install -y proxmox-auto-install-assistant xorriso; fi
+  fi
   ROOTPW="${PBS_ROOT_PASSWORD:-}"
   [ -n "${ROOTPW:-}" ] || { log "HINWEIS: PBS_ROOT_PASSWORD nicht gesetzt - nutze Default 'pbs-auto-123'. Bitte nach Install aendern!"; ROOTPW="pbs-auto-123"; }
+  case "$ROOTPW" in *\"*) die "PBS_ROOT_PASSWORD darf kein Anfuehrungszeichen enthalten (TOML)."; esac
   ANS_DIR="$(mktemp -d)"
+  __net_section='source = "from-dhcp"'
+  if [ -n "${IP_CIDR:-}" ]; then
+    __net_section="source = \"from-answer\"
+cidr = \"$IP_CIDR\"
+gateway = \"$GATEWAY\"
+dns = \"$DNS\""
+  fi
   cat > "$ANS_DIR/answer.toml" <<EOF2
 [global]
 keyboard = "de"
@@ -178,51 +214,73 @@ timezone = "Europe/Berlin"
 root-password = "$ROOTPW"
 
 [network]
-source = "from-dhcp"
+$__net_section
 
 [disk-setup]
 filesystem = "ext4"
-disk-list = ["vda"]
+disk-list = ["sda"]
 EOF2
-  ANSWER_ISO="$ISO_DIR/pbs-answer-$VMID.iso"
+  PREPARED_ISO="$ISO_DIR/pbs-auto-$VMID.iso"
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "+ genisoimage Answer-ISO -> $ANSWER_ISO"
+    echo "+ proxmox-auto-install-assistant validate-answer $ANS_DIR/answer.toml"
+    echo "+ proxmox-auto-install-assistant prepare-iso $ISO_FILE --fetch-from iso --answer-file $ANS_DIR/answer.toml --output $PREPARED_ISO"
   else
-    if command -v genisoimage >/dev/null; then
-      genisoimage -o "$ANSWER_ISO" -V "PBSANSWER" -J -r "$ANS_DIR" >/dev/null
-    elif command -v xorriso >/dev/null; then
-      xorriso -as mkisofs -o "$ANSWER_ISO" -V "PBSANSWER" -J -r "$ANS_DIR" >/dev/null
+    proxmox-auto-install-assistant validate-answer "$ANS_DIR/answer.toml" \
+      || die "answer.toml ungueltig (siehe Ausgabe oben)."
+    if proxmox-auto-install-assistant prepare-iso --help 2>/dev/null | grep -q -- '--output'; then
+      proxmox-auto-install-assistant prepare-iso "$ISO_FILE" --fetch-from iso \
+        --answer-file "$ANS_DIR/answer.toml" --output "$PREPARED_ISO" \
+        || die "prepare-iso fehlgeschlagen."
     else
-      log "WARN: kein ISO-Tool - unattended ohne Answer-ISO, falle auf manuell zurueck."
-      MODE="manual"
+      # alte Tool-Version ohne --output
+      proxmox-auto-install-assistant prepare-iso "$ISO_FILE" --fetch-from iso \
+        --answer-file "$ANS_DIR/answer.toml" \
+        || die "prepare-iso fehlgeschlagen."
+      PREPARED_ISO="$(ls -1t "$ISO_DIR"/pbs-auto-*.iso 2>/dev/null | head -n1 || true)"
+      [ -n "${PREPARED_ISO:-}" ] || die "prepare-iso hat kein Ausgabe-ISO erzeugt."
     fi
   fi
   rm -rf "$ANS_DIR"
-  if [ "$MODE" = "unattended" ]; then
-    run "qm set $VMID --ide3 $ISO_STORAGE:iso/$(basename "$ANSWER_ISO"),media=cdrom"
-    log "Answer-ISO eingebunden. PBS-Auto-Installer startet ab PBS 3.1 automatisch."
-  fi
+  INSTALL_ISO_VOL="$ISO_STORAGE:iso/$(basename "$PREPARED_ISO")"
+  log "Auto-Install-ISO bereit: $INSTALL_ISO_VOL (Bootmenue: 'Automated Installation', 10s Timeout)"
+fi
+
+# Install-ISO einlegen + Bootreihenfolge (ISO zuerst: direkter Installer-Start, kein PXE).
+# Absichtlich zwei getrennte qm-Aufrufe + Config-Ausgabe zur Kontrolle.
+run "qm set $VMID --ide2 $INSTALL_ISO_VOL,media=cdrom"
+run "qm set $VMID --boot 'order=ide2;scsi0'"
+if [ "$DRY_RUN" -eq 0 ]; then
+  log "Resultierende VM-Config:"
+  qm config "$VMID"
 fi
 
 log "Fertig. VM $VMID angelegt."
+if [ -n "${IP_CIDR:-}" ]; then
+  __net_hint="Statisch laut Vorgabe: IP $IP_CIDR, Gateway $GATEWAY, DNS $DNS"
+else
+  __net_hint="Per DHCP (falls dein Netz keins hat: im Installer statisch setzen, z.B. 192.168.178.50/24, Gateway 192.168.178.1, DNS 192.168.178.1)"
+fi
 if [ "$MODE" = "manual" ]; then
   cat <<EOF
 Naechste Schritte (manueller Installer):
   1) qm start $VMID
-  2) Konsole oeffnen: qm terminal $VMID  (oder GUI -> Konsole)
-  3) PBS installieren (Zielplatte: 32G OS-Disk), danach ISO auswerfen:
-       qm set $VMID --delete ide2
-  4) Datastore anlegen (falls extra Disk): GUI -> PBS -> Datastore, z.B. /mnt/datastore
-Einzeiler fuer spaeter:
-  qm start $VMID && qm terminal $VMID
+  2) GUI -> VM $VMID -> Konsole (normales Display, Installer-TUI bedienbar)
+  3) PBS installieren (Zielplatte: ${OS_DISK_SIZE}GB OS-Disk).
+     Netzwerk: $__net_hint
+  4) Nach Installation Boot auf Platte stellen + ISO auswerfen:
+       qm set $VMID --boot 'order=scsi0' && qm set $VMID --delete ide2 && qm start $VMID
+  5) Datastore anlegen (falls extra Disk): PBS-GUI -> Datastore, z.B. /mnt/datastore
+  6) Web-UI: https://<vm-ip>:8007
 EOF
 else
   cat <<EOF
-Unattended angelegt. Start mit:
+Unattended bereit. Start mit:
   qm start $VMID
-Danach Web-UI: https://<dhcp-ip>:8007 (User root)
+Der Installer waehlt automatisch "Automated Installation" (10s Timeout).
+Netzwerk: $__net_hint
+Danach Web-UI: https://<vm-ip>:8007 (User root)
 Root-Passwort: aus Env PBS_ROOT_PASSWORD oder Default (bitte sofort aendern).
-Nach Installation ISO auswerfen:
-  qm set $VMID --delete ide2; qm set $VMID --delete ide3
+Nach Installation Boot auf Platte stellen + ISO auswerfen:
+  qm set $VMID --boot 'order=scsi0' && qm set $VMID --delete ide2
 EOF
 fi

@@ -18,10 +18,17 @@ bash pbs-vm-install.sh --dry-run
 # Standard (manueller Installer, 1x durchklicken)
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/ProxmoxBackUpServerVM/main/pbs-vm-install.sh)"
 
-# vollautomatisch (PBS >= 3.1, DHCP)
+# vollautomatisch per prepare-iso (PBS >= 3.2, DHCP)
 sudo PBS_ROOT_PASSWORD='geheim' bash pbs-vm-install.sh --unattended
 
-# mit extra Datastore-Disk (100G) + eigenem Namen
+# vollautomatisch mit statischer IP (kein DHCP im Netz)
+sudo PBS_ROOT_PASSWORD='geheim' bash pbs-vm-install.sh --unattended \
+  --ip-cidr 192.168.178.50/24 --gateway 192.168.178.1
+
+# manuell, aber mit statischer IP-Vorgabe (steht dann in der Anleitung)
+bash pbs-vm-install.sh --ip-cidr 192.168.178.50/24 --gateway 192.168.178.1
+
+# mit extra Datastore-Disk (100GB) + eigenem Namen
 bash pbs-vm-install.sh --name pbs-main --data-disk 100 --cores 4 --memory 8192
 ```
 
@@ -34,6 +41,11 @@ bash pbs-vm-install.sh --name pbs-main --data-disk 100 --cores 4 --memory 8192
 ## Hinweise
 
 * Auf PVE 8/9 als `root` ausfuehren
-* OS-Disk default 32G, extra Datastore-Disk optional per `--data-disk`
-* Nach Installation ISO auswerfen: `qm set <VMID> --delete ide2`
+* OS-Disk default 32GB (reine Zahl, LVM-Format), extra Datastore-Disk optional per `--data-disk`
+* Bootreihenfolge waehrend Installation: ISO zuerst (`ide2;scsi0`), danach umstellen:
+  `qm set <VMID> --boot 'order=scsi0' && qm set <VMID> --delete ide2`
+* Manueller Modus nutzt Standard-VGA (Installer-TUI in noVNC bedienbar)
+* Unattended nutzt den offiziellen Weg (`proxmox-auto-install-assistant prepare-iso`,
+  wird bei Bedarf per apt nachinstalliert) mit `answer.toml` nach offizieller Doku
+* Kein DHCP im Netz? `--ip-cidr` + `--gateway` mitgeben (DNS defaultet auf Gateway)
 * Der hier im Chat gepostete Token wurde nicht ins Repo uebernommen. Neuen Token erstellen und per `git push` nutzen.
